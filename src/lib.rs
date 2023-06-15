@@ -342,8 +342,8 @@ mod tests {
         let mut path = vec![Location::new(); 100];
         path.fill_with(|| Location::random());
         let run = genetic_algorithm(path, 10, 100);
-        dbg!(run);
-        assert!(false);
+        dbg!(&run);
+        assert_eq!(run.locations.len(), 100);
     }
 
     #[test]
