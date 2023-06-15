@@ -1,4 +1,4 @@
-# (G)enetic (A)gortihm for (V)ehicle (R)outing Problems
+# (G)enetic (A)gortihm for Vehicle (R)outing (P)roblems
 
 ## GA
 Make a genetic algorithm to do the problem meta-heuristically, maybe add hyper params for a laugh

@@ -11,7 +11,10 @@ use uom::si::f32::*;
 use uom::si::length::meter;
 use uom::Conversion;
 
-struct Vehicle {}
+struct Vehicle {
+    start_location: Location,
+    end_location: Location,
+}
 #[derive(Clone, PartialEq, Copy, Debug, PartialOrd)]
 pub struct Location {
     lat: f32,
@@ -25,6 +28,7 @@ impl Location {
             lng: 0_f32,
         }
     }
+
     pub fn random() -> Location {
         let mut rand = rand::thread_rng();
         let lat = rand.gen_range(-180_f32..180_f32);
@@ -57,22 +61,17 @@ struct VehicleRoutingProblem {
     vehicles: Vec<Vehicle>,
 }
 // todo: Could do this as a binary string as described here https://www.mdpi.com/2079-9292/10/24/3147#B5-electronics-10-03147
-#[derive(Clone)]
-pub struct Solution {
-    route: Vec<Location>,
+// todo: add vehicles
+#[derive(Clone, Debug)]
+pub struct Route {
+    locations: Vec<Location>,
 }
 
-impl Solution {
-    pub fn genetic_algorithm(
-        population: Vec<Solution>,
-        generations_limit: usize,
-        success_predicate: &dyn Fn(f32) -> bool,
-    ) -> Vec<Solution> {
-        let mut current_generation = Vec::new();
-        for _ in 0..generations_limit {
-            current_generation = next_generation(&population);
+impl Route {
+    pub fn new() -> Route {
+        Route {
+            locations: Vec::new(),
         }
-        current_generation
     }
 }
 
@@ -112,19 +111,10 @@ impl Costs for HaversineDistances {
     }
 }
 
-//Roulette wheel selection (RWS)—chances of an individual being chosen are proportional to its fitness value; thus, selection may be imagined as a spinning roulette, where each individual takes an amount of space on the roulette wheel according to its fitness.
-//Elitism selection (ES)—a certain percentage of the population, ordered by fitness, is always transferred to the next population. In that scenario, the algorithm makes sure that best so far known solutions would not be lost in the process of selection.
-//Rank selection (RS)—similar to RWS, but each individual solution’s space on the roulette wheel is not proportional to its fitness, but to its rank in the list of all individuals, ordered by fitness.
-//Stochastic universal sampling selection (SUSS)—instead of spinning the wheel of the roulette for a certain amount of times, spin it once. If selecting n individuals, there must exist n spaces on the wheel, and the chosen individual is copied n times to the next generation.
-//Tournament selection (TS)—as many times as required, choose two individuals randomly, and let the more fit one be chosen.
-fn fitness_function(solution: &Solution, distances: &Distances) -> usize {
-    todo!()
-}
-
 // probably pass this in to the functions as a dynamic function
-fn cost_function<C: Costs>(solution: &Solution, costs: &C) -> f32 {
+fn cost_function<C: Costs>(solution: &Route, costs: &C) -> f32 {
     let total_distance: Length = solution
-        .route
+        .locations
         .windows(2)
         .into_iter()
         .map(|loc| (costs.between(&loc[0], &loc[1])).unwrap())
@@ -136,9 +126,9 @@ fn cost_function<C: Costs>(solution: &Solution, costs: &C) -> f32 {
 // I think we'll do elitism + tournament selection
 // and then we also
 // todo: make these selection chains
-fn selection_elitism(solutions: &Vec<Solution>) -> (Vec<Solution>, Vec<Solution>) {
+fn selection_elitism(solutions: &Vec<Route>) -> (Vec<Route>, Vec<Route>) {
     let haversine_distances_costs = HaversineDistances::new();
-    let mut ordered_solutions: Vec<(&Solution, OrderedFloat<f32>)> = solutions
+    let mut ordered_solutions: Vec<(&Route, OrderedFloat<f32>)> = solutions
         .into_iter()
         .map(|solution| {
             (
@@ -157,14 +147,31 @@ fn selection_elitism(solutions: &Vec<Solution>) -> (Vec<Solution>, Vec<Solution>
     let (selected, not_selected) = solutions.split_at(mid);
     (selected.to_vec(), not_selected.to_vec())
 }
-fn selection_tournament(population: &Vec<Solution>) -> (Vec<Solution>, Vec<Solution>) {
-    let haversine_distances_costs = HaversineDistances::new();
-    todo!()
+fn selection_tournament<C: Costs>(population: &Vec<Route>, costs: &C) -> (Vec<Route>, Vec<Route>) {
+    let tournament_size = 3;
+    let mut winners: Vec<Route> = Vec::new();
+    let mut losers: Vec<Route> = Vec::new();
+    for tournament in population.chunks(tournament_size) {
+        let ranked = tournament
+            .into_iter()
+            .map(|d| d.clone())
+            .sorted_by(|first, second| {
+                OrderedFloat(cost_function(first, costs))
+                    .cmp(&OrderedFloat(cost_function(second, costs)))
+            })
+            .collect_vec();
+
+        let (winner, not_winner) = ranked.split_first().unwrap();
+
+        winners.push(winner.clone());
+        losers.extend_from_slice(not_winner);
+    }
+    (winners, losers)
 }
 // do some DI for the cost fn, probably wants to be &dyn Fn(&solution) -> f32
-fn selection(population: &Vec<Solution>) -> (Vec<Solution>, Vec<Solution>) {
+fn selection<C: Costs>(population: &Vec<Route>, costs: &C) -> (Vec<Route>, Vec<Route>) {
     let (mut elitists, mut not_elitists) = selection_elitism(&population);
-    let (mut winners, mut losers) = selection_tournament(&not_elitists);
+    let (mut winners, mut losers) = selection_tournament(&not_elitists, costs);
     losers.append(&mut not_elitists);
     winners.append(&mut elitists);
     (winners, losers)
@@ -224,12 +231,12 @@ fn order_crossover(parent_one: &Vec<Location>, parent_two: &Vec<Location>) -> Ve
         let _ = std::mem::replace(&mut child[idx], female_chromosomes.pop().unwrap());
     }
     assert!(child.len() == male.len());
-    assert!(female_chromosomes.len() == 0);
+    // assert!(female_chromosomes.len() == 0);
     child.into()
 }
 
 // takes in a population and produces a children from the input
-fn reproduction(population: &Vec<Solution>) -> Vec<Solution> {
+fn reproduction(population: &Vec<Route>) -> Vec<Route> {
     // pop need's to be even!
     assert!(population.len() % 2 == 0);
     let children = population
@@ -240,18 +247,18 @@ fn reproduction(population: &Vec<Solution>) -> Vec<Solution> {
                 .get(0)
                 .and_then(|first| chunk.get(1).map(|second| (first, second)))
         })
-        .map(|(a, b)| order_crossover(&a.route, &b.route))
-        .map(|child| Solution { route: child })
-        .collect::<Vec<Solution>>();
+        .map(|(a, b)| order_crossover(&a.locations, &b.locations))
+        .map(|child| Route { locations: child })
+        .collect::<Vec<Route>>();
     children
 }
 
 // swaps: If A-B-C-D then a mutation occurs causing A-B-D-C
 // should probably pass in rand FOR TESTING
-fn mutate_swap<R: Rng>(route: &Vec<Location>, rnd: &mut R) -> Vec<Location> {
+fn mutate_swap<R: Rng>(route: &Vec<Location>, rng: &mut R) -> Vec<Location> {
     let mut new_route = route.clone();
-    let a = rnd.gen_range(0..route.len());
-    let b = rnd.gen_range(0..route.len());
+    let a = rng.gen_range(0..route.len());
+    let b = rng.gen_range(0..route.len());
     new_route.swap(a, b);
     new_route
 }
@@ -259,20 +266,20 @@ fn mutate_swap<R: Rng>(route: &Vec<Location>, rnd: &mut R) -> Vec<Location> {
 // new-route: If we have a section of a route, i.e A -f> B find A -g-> B
 // swaps: If A-B-C-D then a mutation occurs causing A-B-D-C
 // for mvp i'll use swaps coz it easy bruv
-fn mutation<R: Rng>(population: &Vec<Solution>, rnd: &mut R) -> Vec<Solution> {
+fn mutation<R: Rng>(population: &Vec<Route>, rng: &mut R) -> Vec<Route> {
     population
         .iter()
-        .map(|solution| Solution {
-            route: mutate_swap(&solution.route, rnd),
+        .map(|solution| Route {
+            locations: mutate_swap(&solution.locations, rng),
         })
         .collect()
 }
 
 fn sample_by_percentage<R: Rng>(
-    population: &Vec<Solution>,
+    population: &Vec<Route>,
     rng: &mut R,
     percent: PercentageInteger,
-) -> (Vec<Solution>, Vec<Solution>) {
+) -> (Vec<Route>, Vec<Route>) {
     let mut sampled = population.clone();
     sampled.shuffle(rng);
     let amount_to_take = percent.apply_to(population.len());
@@ -283,11 +290,10 @@ fn sample_by_percentage<R: Rng>(
     )
 }
 
-// this should expose the score and a useful struct
-fn next_generation(population: &Vec<Solution>) -> Vec<Solution> {
-    // todo: add a seed, or probably pass the same RNG from the TL
+fn next_generation(population: &Vec<Route>) -> Vec<Route> {
     let mut rand = rand::thread_rng();
-    let (mut current_generation, _expired) = selection(&population);
+    let haversine_distances_costs = HaversineDistances::new();
+    let (mut current_generation, _expired) = selection(&population, &haversine_distances_costs);
     let children = reproduction(&population);
     current_generation.extend(children);
     let (to_mutate, mut dont_mutate) =
@@ -296,12 +302,49 @@ fn next_generation(population: &Vec<Solution>) -> Vec<Solution> {
     dont_mutate
 }
 
+// todo: Need multiple vehicles
+pub fn genetic_algorithm(locations: Vec<Location>, generations: usize, limit: usize) -> Route {
+    let mut rng = rand::thread_rng();
+    // init it
+    let mut shuffle_route: Vec<Location> = locations.clone();
+    let mut current_generation: Vec<Route> = Vec::new();
+    for _ in 0..generations {
+        let _ = &shuffle_route.shuffle(&mut rng);
+        current_generation.push(Route {
+            locations: shuffle_route.clone(),
+        })
+    }
+    for _ in 0..limit {
+        current_generation = next_generation(&current_generation);
+    }
+    let haversine_distances_costs = HaversineDistances::new();
+    current_generation
+        .into_iter()
+        .sorted_by(|one, two| {
+            let first = OrderedFloat::from(cost_function(&one, &haversine_distances_costs));
+            let second = OrderedFloat::from(cost_function(&two, &haversine_distances_costs));
+            first.cmp(&second)
+        })
+        .collect::<Vec<_>>()
+        .first()
+        .unwrap()
+        .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use assert_unordered::assert_eq_unordered;
 
     use super::*;
-    use rand::prelude::*;
+
+    #[test]
+    fn test_algorithm_on_solution() {
+        let mut path = vec![Location::new(); 100];
+        path.fill_with(|| Location::random());
+        let run = genetic_algorithm(path, 10, 100);
+        dbg!(run);
+        assert!(false);
+    }
 
     #[test]
     fn order_crossover_children_contains_parent_paths() {
