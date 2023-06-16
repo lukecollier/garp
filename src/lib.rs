@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::RwLock;
+
 use anyhow::Result;
 use geo::geometry::Point;
 use geo::prelude::*;
@@ -9,12 +12,12 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use uom::si::f32::*;
 use uom::si::length::meter;
-use uom::Conversion;
 
 struct Vehicle {
     start_location: Location,
     end_location: Location,
 }
+
 #[derive(Clone, PartialEq, Copy, Debug, PartialOrd)]
 pub struct Location {
     lat: f32,
@@ -36,29 +39,29 @@ impl Location {
         Location { lat, lng }
     }
 }
-struct Resource {
-    can_use_vehicle: Vec<Vehicle>,
-    start_location: Vec<Vehicle>,
-    end_location: Vec<Vehicle>,
+struct Person {
+    can_use: Vec<Vehicle>,
+    start_location: Vec<Location>,
+    end_location: Vec<Location>,
 }
 // introduce capex https://onlinelibrary.wiley.com/doi/full/10.1002/net.22028
 // introduces VRP and a lot of data about cluster first route second, and route first cluster
 // second https://www.mdpi.com/2079-9292/10/24/3147
-struct Segment {
-    from: Location,
-    to: Location,
-}
-
-struct TravelingSalesmanProblem {
-    visits: Vec<Location>,
-    distances: Vec<Segment>,
-    vehicles: Vec<Vehicle>,
-}
 
 struct VehicleRoutingProblem {
-    visits: Vec<Location>,
-    distances: Vec<Segment>,
+    route: Vec<Location>,
+    person: Vec<Person>,
     vehicles: Vec<Vehicle>,
+}
+
+impl VehicleRoutingProblem {
+    // fn optimize() -> VehicleRoutingProblem {
+    //     VehicleRoutingProblem {
+    //         locations: Vec::new(),
+    //         resources: Vec::new(),
+    //         vehicles: Vec::new(),
+    //     }
+    // }
 }
 // todo: Could do this as a binary string as described here https://www.mdpi.com/2079-9292/10/24/3147#B5-electronics-10-03147
 // todo: add vehicles
@@ -75,8 +78,16 @@ impl Route {
     }
 }
 
-// costs r like this as costs will want to encapsulate state and structs let us do that bby
-trait Costs {
+trait Fitness {
+    fn cost(&self, solution: &Route) -> f32 {
+        let total_distance: Length = solution
+            .locations
+            .windows(2)
+            .into_iter()
+            .map(|loc| (self.between(&loc[0], &loc[1])).unwrap())
+            .sum();
+        total_distance.get::<meter>()
+    }
     fn between(&self, one: &Location, two: &Location) -> Option<Length>;
 }
 
@@ -86,7 +97,7 @@ struct Distances {
     to: Vec<Location>,
 }
 
-impl Costs for Distances {
+impl Fitness for Distances {
     fn between(&self, loc_one: &Location, loc_two: &Location) -> Option<Length> {
         let from_pos = self.from.iter().position(|loc| loc_one == loc);
         let to_pos = self.to.iter().position(|loc| loc_two == loc);
@@ -101,7 +112,8 @@ impl HaversineDistances {
     }
 }
 
-impl Costs for HaversineDistances {
+// might model better as a function
+impl Fitness for HaversineDistances {
     fn between(&self, loc_one: &Location, loc_two: &Location) -> Option<Length> {
         let point_one = Point::new(loc_one.lat, loc_one.lng);
         let point_two = Point::new(loc_two.lat, loc_two.lng);
@@ -112,28 +124,19 @@ impl Costs for HaversineDistances {
 }
 
 // probably pass this in to the functions as a dynamic function
-fn cost_function<C: Costs>(solution: &Route, costs: &C) -> f32 {
-    let total_distance: Length = solution
-        .locations
-        .windows(2)
-        .into_iter()
-        .map(|loc| (costs.between(&loc[0], &loc[1])).unwrap())
-        .sum();
-    total_distance.get::<meter>()
-}
 // plan is apply this first, the returned population is left (the alive) and the right (killed)
 // take the right populatio and apply it to the selection tournament, then we're sorted.
 // I think we'll do elitism + tournament selection
 // and then we also
 // todo: make these selection chains
 fn selection_elitism(solutions: &Vec<Route>) -> (Vec<Route>, Vec<Route>) {
-    let haversine_distances_costs = HaversineDistances::new();
+    let haversine_distances = HaversineDistances::new();
     let mut ordered_solutions: Vec<(&Route, OrderedFloat<f32>)> = solutions
         .into_iter()
         .map(|solution| {
             (
                 solution,
-                OrderedFloat::from(cost_function(&solution, &haversine_distances_costs)),
+                OrderedFloat::from(haversine_distances.cost(&solution)),
             )
         })
         .collect::<Vec<_>>();
@@ -147,7 +150,10 @@ fn selection_elitism(solutions: &Vec<Route>) -> (Vec<Route>, Vec<Route>) {
     let (selected, not_selected) = solutions.split_at(mid);
     (selected.to_vec(), not_selected.to_vec())
 }
-fn selection_tournament<C: Costs>(population: &Vec<Route>, costs: &C) -> (Vec<Route>, Vec<Route>) {
+fn selection_tournament<F: Fitness>(
+    population: &Vec<Route>,
+    fitness: &F,
+) -> (Vec<Route>, Vec<Route>) {
     let tournament_size = 3;
     let mut winners: Vec<Route> = Vec::new();
     let mut losers: Vec<Route> = Vec::new();
@@ -156,8 +162,7 @@ fn selection_tournament<C: Costs>(population: &Vec<Route>, costs: &C) -> (Vec<Ro
             .into_iter()
             .map(|d| d.clone())
             .sorted_by(|first, second| {
-                OrderedFloat(cost_function(first, costs))
-                    .cmp(&OrderedFloat(cost_function(second, costs)))
+                OrderedFloat(fitness.cost(first)).cmp(&OrderedFloat(fitness.cost(second)))
             })
             .collect_vec();
 
@@ -169,9 +174,9 @@ fn selection_tournament<C: Costs>(population: &Vec<Route>, costs: &C) -> (Vec<Ro
     (winners, losers)
 }
 // do some DI for the cost fn, probably wants to be &dyn Fn(&solution) -> f32
-fn selection<C: Costs>(population: &Vec<Route>, costs: &C) -> (Vec<Route>, Vec<Route>) {
+fn selection<F: Fitness>(population: &Vec<Route>, fitness: &F) -> (Vec<Route>, Vec<Route>) {
     let (mut elitists, mut not_elitists) = selection_elitism(&population);
-    let (mut winners, mut losers) = selection_tournament(&not_elitists, costs);
+    let (mut winners, mut losers) = selection_tournament(&not_elitists, fitness);
     losers.append(&mut not_elitists);
     winners.append(&mut elitists);
     (winners, losers)
@@ -292,8 +297,8 @@ fn sample_by_percentage<R: Rng>(
 
 fn next_generation(population: &Vec<Route>) -> Vec<Route> {
     let mut rand = rand::thread_rng();
-    let haversine_distances_costs = HaversineDistances::new();
-    let (mut current_generation, _expired) = selection(&population, &haversine_distances_costs);
+    let haversine_distances = HaversineDistances::new();
+    let (mut current_generation, _expired) = selection(&population, &haversine_distances);
     let children = reproduction(&population);
     current_generation.extend(children);
     let (to_mutate, mut dont_mutate) =
@@ -303,6 +308,8 @@ fn next_generation(population: &Vec<Route>) -> Vec<Route> {
 }
 
 // todo: Need multiple vehicles
+// todo: From run to run are we getting wildly different results for the same
+// VehicleRoutingProblem, can we infact a
 pub fn genetic_algorithm(locations: Vec<Location>, generations: usize, limit: usize) -> Route {
     let mut rng = rand::thread_rng();
     // init it
@@ -317,12 +324,12 @@ pub fn genetic_algorithm(locations: Vec<Location>, generations: usize, limit: us
     for _ in 0..limit {
         current_generation = next_generation(&current_generation);
     }
-    let haversine_distances_costs = HaversineDistances::new();
+    let distances = HaversineDistances::new();
     current_generation
         .into_iter()
         .sorted_by(|one, two| {
-            let first = OrderedFloat::from(cost_function(&one, &haversine_distances_costs));
-            let second = OrderedFloat::from(cost_function(&two, &haversine_distances_costs));
+            let first = OrderedFloat::from(distances.cost(&one));
+            let second = OrderedFloat::from(distances.cost(&two));
             first.cmp(&second)
         })
         .collect::<Vec<_>>()
@@ -338,12 +345,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_algorithm_on_solution() {
-        let mut path = vec![Location::new(); 100];
+    fn cost_has_reduced_over_many_runs() {
+        let total_locations = 10;
+        let mut path = vec![Location::new(); total_locations];
         path.fill_with(|| Location::random());
-        let run = genetic_algorithm(path, 10, 100);
-        dbg!(&run);
-        assert_eq!(run.locations.len(), 100);
+        let distances = HaversineDistances::new();
+        let start_cost = distances.cost(&Route {
+            locations: path.clone(),
+        });
+        let run = genetic_algorithm(path, total_locations, 5000);
+        let end_cost = distances.cost(&run);
+        assert_eq!(run.locations.len(), total_locations);
+        dbg!(start_cost);
+        dbg!(end_cost);
+        assert!(start_cost > end_cost);
+    }
+
+    #[test]
+    fn cost_has_reduced_over_one_run() {
+        let total_locations = 100;
+        let mut path = vec![Location::new(); total_locations];
+        path.fill_with(|| Location::random());
+        let distances = HaversineDistances::new();
+        let start_cost = distances.cost(&Route {
+            locations: path.clone(),
+        });
+        let run = genetic_algorithm(path, total_locations, 1);
+        let end_cost = distances.cost(&run);
+        assert_eq!(run.locations.len(), total_locations);
+        assert!(start_cost > end_cost);
     }
 
     #[test]
